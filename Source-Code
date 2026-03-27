@@ -1,0 +1,76 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
+
+const char *ssid = "Yourssid", *pwd = "yourpassword";
+const char *apiKey = "yourapikey", *phone = "yournumber";
+camera_fb_t *fb = nullptr;
+bool lastBtn = HIGH;
+
+void initCam() {
+  camera_config_t cfg; cfg.ledc_channel=LEDC_CHANNEL_0; cfg.ledc_timer=LEDC_TIMER_0;
+  cfg.pin_d0=5; cfg.pin_d1=18; cfg.pin_d2=19; cfg.pin_d3=21; cfg.pin_d4=36; cfg.pin_d5=39;
+  cfg.pin_d6=34; cfg.pin_d7=35; cfg.pin_xclk=0; cfg.pin_pclk=22; cfg.pin_vsync=25;
+  cfg.pin_href=23; cfg.pin_sscb_sda=26; cfg.pin_sscb_scl=27; cfg.pin_pwdn=32; cfg.pin_reset=-1;
+  cfg.xclk_freq_hz=20000000; cfg.pixel_format=PIXFORMAT_JPEG;
+  cfg.frame_size=psramFound()?FRAMESIZE_VGA:FRAMESIZE_QVGA;
+  cfg.jpeg_quality=psramFound()?10:12; cfg.fb_count=psramFound()?2:1;
+  if(esp_camera_init(&cfg) != ESP_OK) ESP.restart();
+}
+
+void sendWa() {
+  if(!fb) return;
+  if(WiFi.status() != WL_CONNECTED) WiFi.reconnect();
+  while(WiFi.status() != WL_CONNECTED) delay(100);
+  
+  uint8_t *imgBuf = (uint8_t*)malloc(fb->len);
+  if(!imgBuf) { esp_camera_fb_return(fb); fb=nullptr; return; }
+  size_t len = fb->len; memcpy(imgBuf, fb->buf, len);
+  esp_camera_fb_return(fb); fb = nullptr;
+  esp_camera_deinit(); delay(100);
+
+  WiFiClientSecure client; client.setInsecure();
+  if(!client.connect("www.circuitdigest.cloud", 443)) { free(imgBuf); initCam(); return; }
+
+  struct tm ti; char ts[64] = "Time Unknown";
+  if(getLocalTime(&ti, 1000)) strftime(ts, 64, "%I:%M %p, %B %d, %Y", &ti);
+
+  String b = "ESP32CAMBound7MA4YWxkTrZu0gW", cr = "\r\n", d = "--";
+  String body = d+b+cr+"Content-Disposition: form-data; name=\"phone_number\""+cr+cr+phone+cr+
+    d+b+cr+"Content-Disposition: form-data; name=\"template_id\""+cr+cr+"image_capture_alert"+cr+
+    d+b+cr+"Content-Disposition: form-data; name=\"variables\""+cr+cr+"{\"event_type\":\"Just a Picture\",\"location\":\"office\",\"device_name\":\"ESP32 CAM #1\",\"captured_time\":\""+String(ts)+"\"}"+cr+
+    d+b+cr+"Content-Disposition: form-data; name=\"image\"; filename=\"p.jpg\""+cr+"Content-Type: image/jpeg"+cr+cr;
+  String end = cr+d+b+d+cr;
+
+  client.println("POST /api/v1/whatsapp/send-with-image HTTP/1.1");
+  client.println("Host: www.circuitdigest.cloud\r\nAuthorization: " + String(apiKey));
+  client.println("Content-Type: multipart/form-data; boundary=" + b);
+  client.println("Content-Length: " + String(body.length() + len + end.length()) + "\r\n");
+  
+  client.print(body); client.write(imgBuf, len); client.print(end); free(imgBuf);
+  while(client.connected()) if(client.readStringUntil('\n') == "\r") break;
+  client.stop(); initCam();
+}
+
+void setup() {
+  Serial.begin(115200); pinMode(4, OUTPUT); pinMode(13, INPUT_PULLUP);
+  initCam(); 
+  WiFi.begin(ssid, pwd);
+  while(WiFi.status() != WL_CONNECTED) delay(100);
+  configTime(19800, 0, "pool.ntp.org");
+  Serial.println("Ready!");
+}
+
+void loop() {
+  bool cur = digitalRead(13);
+  if(lastBtn == HIGH && cur == LOW) {
+    delay(50);
+    if(digitalRead(13) == LOW) {
+      camera_fb_t *s = esp_camera_fb_get(); if(s) esp_camera_fb_return(s);
+      digitalWrite(4, HIGH); delay(150); fb = esp_camera_fb_get(); digitalWrite(4, LOW);
+      Serial.println("Captured!"); sendWa(); cur = digitalRead(13);
+    }
+  }
+  lastBtn = cur; delay(10);
+}
